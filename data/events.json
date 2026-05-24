@@ -1,0 +1,16 @@
+[
+  {
+    "id": "evt_1779658294072_c21ci6p0i",
+    "type": {
+      "id": "test-1779658294072",
+      "type": "TEST_EVENT",
+      "data": {
+        "test": true
+      },
+      "timestamp": "2026-05-24T21:31:34.072Z"
+    },
+    "aggregateId": "agg_1779658294072_8ermxf",
+    "timestamp": 1779658294072,
+    "version": 1
+  }
+]

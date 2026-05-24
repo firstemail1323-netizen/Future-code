@@ -1,0 +1,31 @@
+{
+  "name": "future-code-agent",
+  "version": "2.0.0",
+  "description": "Multi-Agent Mesh Architecture with Event Sourcing and MCP compatibility for intelligent code reorganization",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:mcp": "node index.js --mcp",
+    "start:cli": "node index.js --cli-only",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "ai",
+    "code-reorganization",
+    "terminal",
+    "agent",
+    "multi-agent",
+    "event-sourcing",
+    "mcp",
+    "websocket"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "ws": "^8.14.0"
+  }
+}
