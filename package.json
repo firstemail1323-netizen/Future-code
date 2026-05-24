@@ -1,13 +1,14 @@
 {
   "name": "future-code",
   "version": "1.0.0",
-  "description": "A terminal similar to Claude Code but even better",
+  "description": "Universal terminal assistant for any LLM provider",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "anthropic": "^0.27.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.7",
+    "openai": "^4.77.0",
+    "ollama": "^0.5.13"
   }
 }
