@@ -1,235 +1,411 @@
-#!/usr/bin/env node
-
-/**
- * Future-Code Agent v2.0 - Main Entry Point
- * Multi-Agent Mesh Architecture with Event Sourcing and MCP compatibility
- * 
- * Features:
- * - Agent Mesh (Orchestrator, LLM, FileSystem, CodeAnalyzer, ProjectMemory)
- * - Event Sourcing for full history and time travel
- * - MCP Server for AI tool compatibility
- * - WebSocket/SSE streaming
- * - Vector search for semantic memory
- * - Self-learning routing optimization
- */
-
+const fs = require('fs');
+const path = require('path');
 const readline = require('readline');
-const { bus } = require('./src/bus/messageBus');
-const { eventStore, EventTypes } = require('./src/events/eventStore');
-const { orchestratorAgent } = require('./src/agents/orchestratorAgent');
-const { mcpServer } = require('./src/mcp/mcpServer');
-const { webSocketServer } = require('./src/websocket/wsServer');
-const { vectorDB, textEmbedder } = require('./src/vector/vectorDB');
-const { projectMemoryAgent } = require('./src/agents/projectMemoryAgent');
-const { workflowEngine } = require('./src/workflow/workflowEngine');
-const { monitor } = require('./src/monitor/monitor');
-const { selfLearningModule } = require('./src/selfLearning/selfLearning');
-const { fileSystemAgent } = require('./src/agents/fileSystemAgent');
-const { ReorganizeService } = require('./src/services/reorganizeService');
-const terminal = require('./src/utils/terminalUtils');
+const { execSync } = require('child_process');
 
-// Parse command line arguments
-const args = process.argv.slice(2);
-const disableCapabilities = [];
-let noColor = false;
+// ======================= הגדרות =======================
+const PROVIDERS = {
+  openrouter: {
+    name: 'OpenRouter',
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'anthropic/claude-3-5-sonnet-20240620',
+    requiresKey: true,
+    headers: (key) => ({
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://future-code.local',
+      'X-Title': 'Future-Code-Agent'
+    }),
+    body: (model, messages) => JSON.stringify({
+      model: model,
+      messages: messages,
+      max_tokens: 8192,
+      temperature: 0.1
+    }),
+    parse: (data) => data?.choices?.[0]?.message?.content || 'Error'
+  },
+  openai: {
+    name: 'OpenAI',
+    url: 'https://api.openai.com/v1/chat/completions',
+    model: 'gpt-4o',
+    requiresKey: true,
+    headers: (key) => ({
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json'
+    }),
+    body: (model, messages) => JSON.stringify({
+      model: model,
+      messages: messages,
+      max_tokens: 8192,
+      temperature: 0.1
+    }),
+    parse: (data) => data?.choices?.[0]?.message?.content || 'Error'
+  },
+  anthropic: {
+    name: 'Anthropic',
+    url: 'https://api.anthropic.com/v1/messages',
+    model: 'claude-3-5-sonnet-20240620',
+    requiresKey: true,
+    headers: (key) => ({
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json'
+    }),
+    body: (model, messages) => {
+      const formatted = messages.map(m => ({ role: m.role === 'system' ? 'assistant' : m.role, content: m.content }));
+      return JSON.stringify({
+        model: model,
+        max_tokens: 8192,
+        messages: formatted
+      });
+    },
+    parse: (data) => data?.content?.[0]?.text || 'Error'
+  },
+  gemini: {
+    name: 'Google Gemini',
+    url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent',
+    model: null,
+    requiresKey: true,
+    headers: (key) => ({ 'Content-Type': 'application/json' }),
+    body: (model, messages) => {
+      const prompt = messages[messages.length - 1].content;
+      return JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }]
+      });
+    },
+    parse: (data) => data?.candidates?.[0]?.content?.parts?.[0]?.text || 'Error',
+    getUrl: (key) => `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${key}`
+  },
+  groq: {
+    name: 'Groq',
+    url: 'https://api.groq.com/openai/v1/chat/completions',
+    model: 'llama3-70b-8192',
+    requiresKey: true,
+    headers: (key) => ({
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json'
+    }),
+    body: (model, messages) => JSON.stringify({
+      model: model,
+      messages: messages,
+      max_tokens: 8192,
+      temperature: 0.1
+    }),
+    parse: (data) => data?.choices?.[0]?.message?.content || 'Error'
+  }
+};
 
-// Parse --capability and --no-color flags
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--capability' && args[i + 1] === 'disable') {
-    const cap = args[i + 2];
-    if (cap) {
-      disableCapabilities.push(cap);
-      i += 2;
+// ======================= שליפת API Key =======================
+const providerKeys = Object.keys(PROVIDERS);
+let selectedProvider = null;
+let apiKey = null;
+
+function chooseProviderFromEnv() {
+  for (const key of providerKeys) {
+    const envKey = process.env[`${key.toUpperCase()}_API_KEY`];
+    if (envKey && envKey.length > 10) {
+      selectedProvider = PROVIDERS[key];
+      apiKey = envKey;
+      console.log(`🔑 Found API Key for: ${selectedProvider.name}`);
+      return true;
     }
-  } else if (args[i] === '--no-color') {
-    noColor = true;
-    terminal.setColorsEnabled(false);
+  }
+  return false;
+}
+
+// ======================= כלי עזר =======================
+function readFileContent(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    return null;
   }
 }
 
-async function main() {
-  terminal.printHeader('🚀 Future-Code Agent v2.0 - Multi-Agent Mesh Architecture');
+function writeFileContent(filePath, content) {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, content, 'utf8');
+    return true;
+  } catch (e) {
+    console.error(`❌ Failed to write ${filePath}: ${e.message}`);
+    return false;
+  }
+}
 
-  // Initialize core systems
-  terminal.printInfo('Loading environment and initializing agents...');
+function moveFile(from, to) {
+  try {
+    const dir = path.dirname(to);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.renameSync(from, to);
+    return true;
+  } catch (e) {
+    console.error(`❌ Move failed from ${from} to ${to}: ${e.message}`);
+    return false;
+  }
+}
 
-  await orchestratorAgent.initialize();
+function deleteFile(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (e) {
+    console.error(`❌ Delete failed ${filePath}: ${e.message}`);
+    return false;
+  }
+}
 
-  // Apply capability constraints
-  if (disableCapabilities.length > 0) {
-    terminal.printWarning(`Disabling capabilities: ${disableCapabilities.join(', ')}`);
-    fileSystemAgent.initialize({ disabledCapabilities: disableCapabilities });
-  } else {
-    fileSystemAgent.initialize();
+function getProjectFiles(dir, baseDir = dir) {
+  let results = [];
+  const list = fs.readdirSync(dir);
+  for (const file of list) {
+    const fullPath = path.join(dir, file);
+    const stat = fs.statSync(fullPath);
+    if (stat.isDirectory()) {
+      // Skip node_modules, .git, .env, etc.
+      if (file === 'node_modules' || file === '.git' || file === '.env' || file === 'dist' || file === 'build') continue;
+      results = results.concat(getProjectFiles(fullPath, baseDir));
+    } else {
+      // Ignore binary files, .gitignore, etc.
+      if (file === '.gitignore' || file === '.env' || file === 'package-lock.json' || file === 'yarn.lock') continue;
+      results.push(path.relative(baseDir, fullPath));
+    }
+  }
+  return results;
+}
+
+function updateImportsInFile(filePath, importChanges) {
+  if (!importChanges || importChanges.length === 0) return;
+  let content = readFileContent(filePath);
+  if (!content) return;
+
+  let modified = content;
+  for (const change of importChanges) {
+    const { fromPath, toPath } = change;
+    // Simple regex replacement for import/require statements
+    const importRegex = new RegExp(`(import\\s+.*from\\s+['"])${fromPath}(['"])`, 'g');
+    const requireRegex = new RegExp(`(require\\(['"])${fromPath}(['"]\\))`, 'g');
+    modified = modified.replace(importRegex, `$1${toPath}$2`);
+    modified = modified.replace(requireRegex, `$1${toPath}$2`);
+  }
+  if (modified !== content) {
+    writeFileContent(filePath, modified);
+    console.log(`📝 Updated imports in: ${filePath}`);
+  }
+}
+
+function splitFile(filePath, parts) {
+  const baseName = path.basename(filePath, path.extname(filePath));
+  const ext = path.extname(filePath);
+  const dir = path.dirname(filePath);
+
+  const newFiles = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const newFileName = `${baseName}_part${i + 1}${ext}`;
+    const newPath = path.join(dir, newFileName);
+    writeFileContent(newPath, part.content);
+    newFiles.push({ original: filePath, part: newPath, index: i });
+  }
+  return newFiles;
+}
+
+// ======================= תקשורת עם AI =======================
+async function askAI(prompt, systemPrompt = '') {
+  if (!selectedProvider) {
+    console.error('❌ No AI provider selected (missing API key).');
+    return null;
   }
 
-  // Start servers based on mode
-  const mcpMode = args.includes('--mcp');
-  const noServers = args.includes('--cli-only');
+  const messages = [];
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  messages.push({ role: 'user', content: prompt });
 
-  if (!noServers) {
-    // Start MCP server
-    mcpServer.start();
+  const url = selectedProvider.name === 'Google Gemini' 
+    ? selectedProvider.getUrl(apiKey) 
+    : selectedProvider.url;
 
-    // Start WebSocket server for streaming
-    webSocketServer.start();
-  }
+  const body = selectedProvider.body(selectedProvider.model, messages);
 
-  // Store conversation in vector DB and memory
-  bus.subscribe('agent.llm.response', (envelope) => {
-    const { response, provider } = envelope.message;
-
-    // Create embedding and store in vector DB
-    const embedding = textEmbedder.embed(response || '');
-    vectorDB.add(`llm_${Date.now()}`, embedding, {
-      type: 'llm_response',
-      provider,
-      timestamp: Date.now()
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: selectedProvider.headers(apiKey),
+      body: body
     });
 
-    // Store in project memory
-    projectMemoryAgent.store('conversation', {
-      response,
-      provider
-    }, { importance: 3 });
-  });
+    const data = await res.json();
+    return selectedProvider.parse(data);
+  } catch (err) {
+    console.error(`❌ AI request failed: ${err.message}`);
+    return null;
+  }
+}
 
-  // If MCP mode, just run servers
-  if (mcpMode) {
-    console.log('\n[MCP Mode] Server running. Connect with MCP-compatible clients.');
-    console.log('Press Ctrl+C to stop.\n');
+// ======================= פונקציית הסידור האוטונומית =======================
+async function reorganizeProject() {
+  console.log('🔍 Scanning project directory...');
+  const files = getProjectFiles('.');
+  console.log(`📁 Found ${files.length} files.`);
+
+  if (files.length === 0) {
+    console.log('❌ No files found to organize.');
     return;
   }
 
-  // CLI mode - original functionality preserved
-  terminal.printSuccess('CLI Mode Ready for input.');
-  terminal.printDivider('Available Commands');
+  // Build the project structure string for AI
+  const fileTree = files.join('\n');
 
-  const commands = [
-    '  reorganize     - Reorganize the project',
-    '  status         - Show system status',
-    '  memory         - Search project memory',
-    '  metrics        - Show agent metrics',
-    '  learning       - Show learning analysis',
-    '  events         - Show recent events',
-    '  help           - Show this help',
-    '  quit/exit      - Exit the application'
-  ];
-  commands.forEach(cmd => console.log(cmd));
-  console.log();
+  // הגדרת הפרומפט לסידור
+  const systemPrompt = `You are an expert code architect and file organizer. 
+You will receive a file list of a project. Your task is to analyze it and output a JSON plan. 
+The JSON must have the following structure:
+{
+  "fileMoves": [{"from": "path/to/file.js", "to": "src/controllers/file.js"}],
+  "importChanges": [{"file": "path/to/module.js", "fromPath": "../old/location", "toPath": "../new/location"}],
+  "newFiles": [{"path": "src/utils/helper.js", "content": "// content of new file"}],
+  "deletedFiles": ["path/to/dead/file.js"],
+  "splitFiles": [{"file": "path/to/large.js", "parts": [{"name": "part1", "content": "code..."}, {"name": "part2", "content": "code..."}]}],
+  "readme": "# Project Name\\n\\n## Structure\\n...",
+  "packageChanges": {"dependencies": {"express": "^4.18.0"}, "scripts": {"start": "node index.js"}}
+}
+Do NOT use Markdown code fences in the JSON. Return ONLY valid JSON. 
+Analyze the code structure deeply, propose a clean modular architecture (MVC, service layer, etc.), and split files if needed. 
+For each move, update imports accordingly. Create new files if missing, delete dead code if safe. 
+Generate a full README. Output only the JSON.`;
 
+  const userPrompt = `Here is the list of files:\n${fileTree}\n\nOrganize this project completely.`;
+
+  console.log('🤖 Sending to AI for analysis...');
+  const response = await askAI(userPrompt, systemPrompt);
+  
+  if (!response) {
+    console.log('❌ AI analysis failed.');
+    return;
+  }
+
+  // Parse JSON
+  let plan;
+  try {
+    const start = response.indexOf('{');
+    const end = response.lastIndexOf('}');
+    if (start === -1 || end === -1) throw new Error('No JSON found');
+    const jsonString = response.substring(start, end + 1);
+    plan = JSON.parse(jsonString);
+  } catch (e) {
+    console.log('❌ Could not parse AI response as JSON. Raw response:');
+    console.log(response);
+    return;
+  }
+
+  console.log('📋 AI Plan received. Executing...\n');
+
+  // 1. Create new files
+  if (plan.newFiles) {
+    for (const file of plan.newFiles) {
+      writeFileContent(file.path, file.content);
+      console.log(`✅ Created: ${file.path}`);
+    }
+  }
+
+  // 2. Move files
+  if (plan.fileMoves) {
+    for (const move of plan.fileMoves) {
+      if (fs.existsSync(move.from)) {
+        moveFile(move.from, move.to);
+        console.log(`✅ Moved: ${move.from} → ${move.to}`);
+      }
+    }
+  }
+
+  // 3. Update imports (after moves, before split/deletes)
+  if (plan.importChanges) {
+    const importsByFile = {};
+    for (const change of plan.importChanges) {
+      if (!importsByFile[change.file]) importsByFile[change.file] = [];
+      importsByFile[change.file].push(change);
+    }
+    for (const [filePath, changes] of Object.entries(importsByFile)) {
+      updateImportsInFile(filePath, changes);
+    }
+  }
+
+  // 4. Split files
+  if (plan.splitFiles) {
+    for (const split of plan.splitFiles) {
+      if (fs.existsSync(split.file)) {
+        splitFile(split.file, split.parts);
+        console.log(`✅ Split: ${split.file} into ${split.parts.length} parts`);
+      }
+    }
+  }
+
+  // 5. Delete files (only if safe)
+  if (plan.deletedFiles) {
+    for (const del of plan.deletedFiles) {
+      if (fs.existsSync(del)) {
+        deleteFile(del);
+        console.log(`🗑️ Deleted: ${del}`);
+      }
+    }
+  }
+
+  // 6. Write README
+  if (plan.readme) {
+    writeFileContent('README.md', plan.readme);
+    console.log('📖 README.md created');
+  }
+
+  // 7. Update package.json if needed
+  if (plan.packageChanges) {
+    const pkgPath = 'package.json';
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileContent(pkgPath) || '{}');
+      if (plan.packageChanges.dependencies) {
+        pkg.dependencies = { ...pkg.dependencies, ...plan.packageChanges.dependencies };
+      }
+      if (plan.packageChanges.scripts) {
+        pkg.scripts = { ...pkg.scripts, ...plan.packageChanges.scripts };
+      }
+      writeFileContent(pkgPath, JSON.stringify(pkg, null, 2));
+      console.log('📦 Updated package.json');
+    }
+  }
+
+  console.log('\n✅ All tasks completed! Project reorganized.');
+}
+
+// ======================= main =======================
+async function main() {
+  // 1. טיפול ב-Environment Variables
+  if (!chooseProviderFromEnv()) {
+    console.log('❌ No valid API keys found in environment variables.');
+    console.log('Add one of: OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY');
+    process.exit(1);
+  }
+
+  // 2. בקשת אישור למשתמש
+  console.log(`🚀 Future-Code AGENT (using ${selectedProvider.name}) is about to reorganize your project.`);
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
   });
 
-  rl.question('> ', handleCommand);
-
-  function handleCommand(input) {
-    const cmd = input.trim().toLowerCase();
-
-    switch (cmd) {
-      case 'quit':
-      case 'exit':
-        terminal.printInfo('Goodbye!');
-        cleanup();
-        process.exit(0);
-        break;
-
-      case 'reorganize':
-        terminal.printHeader('🔄 Starting Project Reorganization');
-        bus.publish('orchestrator.reorganize', { options: {} });
-        rl.question('> ', handleCommand);
-        break;
-
-      case 'status':
-        const status = {
-          orchestrator: orchestratorAgent.getStatus(),
-          filesystem: fileSystemAgent.getStatus(),
-          memory: projectMemoryAgent.getStatus(),
-          vectorDB: vectorDB.getStats(),
-          workflow: workflowEngine.getStats(),
-          monitor: monitor.getHealth(),
-          learning: selfLearningModule.analyzePatterns()
-        };
-        terminal.printHeader('📊 System Status');
-        terminal.printCodeBlock(JSON.stringify(status, null, 2));
-        rl.question('> ', handleCommand);
-        break;
-
-      case 'memory':
-        rl.question('Search query: ', (query) => {
-          const results = projectMemoryAgent.search(query);
-          terminal.printHeader(`🔍 Memory Results (${results.length})`);
-          results.forEach((r, i) => {
-            console.log(`  ${i + 1}. [${r.type}] ${JSON.stringify(r.content).substring(0, 100)}...`);
-          });
-          rl.question('> ', handleCommand);
-        });
-        break;
-
-      case 'metrics':
-        const metrics = monitor.getAllMetrics();
-        terminal.printHeader('📈 Agent Metrics');
-        terminal.printCodeBlock(JSON.stringify(metrics, null, 2));
-        rl.question('> ', handleCommand);
-        break;
-
-      case 'learning':
-        const analysis = selfLearningModule.analyzePatterns();
-        terminal.printHeader('🧠 Learning Analysis');
-        terminal.printCodeBlock(JSON.stringify(analysis, null, 2));
-        rl.question('> ', handleCommand);
-        break;
-
-      case 'events':
-        const events = eventStore.getAll();
-        const recent = events.slice(-10);
-        terminal.printHeader('📜 Recent Events');
-        recent.forEach(e => {
-          console.log(`  [${e.type}] ${new Date(e.timestamp).toLocaleTimeString()}`);
-        });
-        rl.question('> ', handleCommand);
-        break;
-
-      case 'help':
-        terminal.printDivider('Available Commands');
-        commands.forEach(cmd => console.log(cmd));
-        console.log();
-        rl.question('> ', handleCommand);
-        break;
-
-      default:
-        // Send to orchestrator for processing
-        terminal.printInfo('Processing...');
-        bus.publish('orchestrator.input', {
-          input,
-          replyTo: `cli.${Date.now()}`
-        });
-
-        // Wait for response
-        setTimeout(() => {
-          rl.question('> ', handleCommand);
-        }, 1000);
+  rl.question('Proceed? (y/n): ', (answer) => {
+    if (answer.toLowerCase() !== 'y') {
+      console.log('Aborted.');
+      rl.close();
+      process.exit(0);
     }
-  }
-
-  function cleanup() {
-    terminal.printInfo('Cleaning up...');
-    mcpServer.stop();
-    webSocketServer.stop();
-    eventStore._saveEvents();
-    projectMemoryAgent._saveMemory();
-    monitor._saveMetrics();
-    terminal.printSuccess('Shutdown Complete');
-  }
-
-  // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    cleanup();
-    process.exit(0);
+    rl.close();
+    reorganizeProject();
   });
 }
 
-// Run the application
+// הפעלה
 main();
