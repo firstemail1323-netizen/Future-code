@@ -1,0 +1,13 @@
+{
+  "name": "future-code",
+  "version": "1.0.0",
+  "description": "A terminal similar to Claude Code but even better",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "anthropic": "^0.27.0",
+    "dotenv": "^16.4.5"
+  }
+}
